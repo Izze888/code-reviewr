@@ -1,0 +1,65 @@
+name: Suds Review
+
+# AI pull-request reviewer. Reviews each push, posts findings as review
+# threads, resolves its own threads a later push fixed, and reports the
+# "Suds Review" check run on the exact head commit.
+#
+# pull_request_target runs THIS file and the reviewer from the base branch,
+# so a PR cannot change its own reviewer, prompt, or rules. The PR's commits
+# are fetched as data and only read with git: nothing from the PR is
+# installed, built, or executed here. That is what makes the API key safe in
+# this job. Never add a step that runs code from the PR head.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# Nothing unless a job asks. A new job must not inherit a write token.
+permissions: {}
+
+concurrency:
+  group: suds-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    permissions:
+      # resolveReviewThread needs contents: write. pull-requests: write posts
+      # findings. checks: write is the check run. This job never pushes.
+      contents: write
+      pull-requests: write
+      checks: write
+    name: Suds Review runner
+    # Cost guards: drafts wait for ready_for_review; fork PRs never get the
+    # key. Off switch: set the repository variable SUDS_REVIEW_PAUSED to "true".
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      vars.SUDS_REVIEW_PAUSED != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out the base branch (the trusted reviewer)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+
+      - name: Review this push
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          # Off switch for reading files outside the diff: repository
+          # variable SUDS_REVIEW_REPO_TOOLS=off.
+          SUDS_REVIEW_REPO_TOOLS: ${{ vars.SUDS_REVIEW_REPO_TOOLS }}
+        run: node .github/suds-review/review.mjs
+
+      - name: Close the check if the review stopped early
+        if: cancelled() || failure()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node .github/suds-review/review.mjs --finish-aborted "${{ job.status }}"
