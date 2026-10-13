@@ -215,18 +215,20 @@ function prefetchHeadBlobs(headSha) {
 // One batch review. With headSha, the reviewer may read the repository
 // (core.REPO_TOOLS) for up to core.TOOL_LIMITS.maxRounds rounds before it
 // must answer.
-async function callClaude(system, user, effort, { headSha = null, readUntil = Infinity } = {}) {
+async function callClaude(system, user, effort, { headSha = null, readUntil = Infinity, sessionId = "" } = {}) {
   const messages = [{ role: "user", content: user }];
   let usage = core.EMPTY_RAW_USAGE;
   let toolCalls = 0;
   // Checked before every request (a later batch can start after the review's
   // reading time is up): once spent, the request forbids tools so the model
-  // answers in that same call.
+  // answers in that same call. The round cap stays core.TOOL_LIMITS.maxRounds.
   let mustAnswer = false;
   for (let round = 0; round <= core.TOOL_LIMITS.maxRounds + 1; round += 1) {
     mustAnswer ||= core.readingSpent({ round, now: Date.now(), readUntil });
     const result = await chat(core.openRouterChatBody({
       system, messages, effort, withTools: Boolean(headSha), mustAnswer: !headSha || mustAnswer,
+      cachePrompt: true,
+      sessionId,
     }));
     usage = core.sumRawUsage(usage, result.usage);
     if (result.refusal) throw new Error("Claude declined to review this batch");
@@ -263,12 +265,15 @@ async function reviewBatches({ system, pr, kind, batches, open, fake, meter, rep
   const readUntil = Date.now() + core.TOOL_LIMITS.readingMs;
   const findings = [];
   const prior = [];
+  // One sticky session per PR so each batch and each file-reading round
+  // returns to the provider that cached the system prompt and the tools.
+  const sessionId = `suds-review/${pr.number}`;
   for (const batch of batches) {
     const paths = batch.map((file) => file.path);
     const batchPrior = core.batchThreads(open, batch);
     const user = core.batchPrompt({ pr, batch, prior: batchPrior, kind });
     meter.calls += 1;
-    const result = fake ? { raw: fake, usage: {}, model: meter.model } : await callClaude(system, user, effort, { headSha: repoTools ? pr.headSha : null, readUntil });
+    const result = fake ? { raw: fake, usage: {}, model: meter.model } : await callClaude(system, user, effort, { headSha: repoTools ? pr.headSha : null, readUntil, sessionId });
     meter.usage = core.addUsage(meter.usage, result.usage);
     meter.toolCalls = (meter.toolCalls ?? 0) + (result.toolCalls ?? 0);
     meter.model = result.model ?? meter.model;
@@ -290,6 +295,17 @@ async function run() {
     commitCount: pull.commits,
     runUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
   };
+  // The workflow already waited about 10 minutes. If a newer push won the
+  // race anyway, leave the check to that run.
+  try {
+    const latest = await github("GET", `/repos/${ctx.repo}/pulls/${ctx.number}`);
+    if (core.headMovedOn(ctx.headSha, latest?.head?.sha)) {
+      console.log(`Skipping ${ctx.headSha.slice(0, 9)}: the PR head is now ${String(latest.head.sha).slice(0, 9)}.`);
+      return;
+    }
+  } catch (caught) {
+    console.error(caught);
+  }
   const check = await github("POST", `/repos/${ctx.repo}/check-runs`, {
     name: core.CHECK_NAME, head_sha: ctx.headSha, status: "in_progress", details_url: ctx.runUrl, external_id: String(process.env.GITHUB_RUN_ID ?? ""),
     output: { title: "Reviewing", summary: "Suds Review is reading this push." },

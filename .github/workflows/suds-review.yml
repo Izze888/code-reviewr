@@ -1,8 +1,13 @@
 name: Suds Review
 
-# AI pull-request reviewer. Reviews each push, posts findings as review
-# threads, resolves its own threads a later push fixed, and reports the
+# AI pull-request reviewer. Waits until pushes stop, then posts findings as
+# review threads, resolves its own threads a later push fixed, and reports the
 # "Suds Review" check run on the exact head commit.
+#
+# One review per burst of pushes: the concurrency group cancels the run that
+# is waiting or reviewing when a new push arrives, and that new run waits its
+# own 10 minutes. The review's up-to-12 rounds of extra file reading are
+# unchanged.
 #
 # pull_request_target runs THIS file and the reviewer from the base branch,
 # so a PR cannot change its own reviewer, prompt, or rules. The PR's commits
@@ -36,7 +41,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       vars.SUDS_REVIEW_PAUSED != 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # 10 minutes of this limit is the settle wait. The review itself still
+    # has 40 minutes, including up to 12 rounds of extra file reading.
+    timeout-minutes: 50
     steps:
       - name: Check out the base branch (the trusted reviewer)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -48,6 +55,11 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
+
+      - name: Wait until pushes stop
+        # A newer push cancels this step and starts its own wait, so the
+        # review below runs once, about 10 minutes after the last push.
+        run: sleep 600
 
       - name: Review this push
         env:

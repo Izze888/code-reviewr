@@ -657,6 +657,42 @@ export function openRouterRetryDelayMs({ attempt, retryAfter }) {
   return 500 * attempt;
 }
 
+// Anthropic on OpenRouter caches only prefixes marked with cache_control.
+// The 5-minute ephemeral TTL matches costUSD (cache writes at 1.25x input).
+export const PROMPT_CACHE = Object.freeze({ type: "ephemeral" });
+
+export function anthropicModel(model) {
+  const name = String(model ?? "").toLowerCase();
+  return name.startsWith("anthropic/") || name.startsWith("claude-");
+}
+
+function cachedText(text) {
+  return { type: "text", text: String(text ?? ""), cache_control: { ...PROMPT_CACHE } };
+}
+
+// Mark a string, or the last text block of an array, so the prefix through
+// that block can be cached. Leaves tool-role messages alone: a cache marker
+// on those is not part of this request shape.
+function withCacheBreakpoint(message) {
+  if (!message || message.role === "tool") return message;
+  if (typeof message.content === "string") return { ...message, content: [cachedText(message.content)] };
+  if (!Array.isArray(message.content) || !message.content.length) return message;
+  const last = message.content.length - 1;
+  const content = message.content.map((part, index) => {
+    if (index !== last || !part || part.type !== "text" || part.cache_control) return part;
+    return { ...part, cache_control: { ...PROMPT_CACHE } };
+  });
+  return { ...message, content };
+}
+
+// After the workflow waits out a burst of pushes, this run reviews only when
+// it is still the PR head. A newer push has its own run. An unreadable head
+// is not treated as moved: the caller still reviews.
+export function headMovedOn(runSha, latestSha) {
+  if (typeof latestSha !== "string" || latestSha === "") return false;
+  return latestSha.toLowerCase() !== String(runSha ?? "").toLowerCase();
+}
+
 export function openRouterTools(tools = REPO_TOOLS) {
   return tools.map((tool) => ({
     type: "function",
@@ -674,19 +710,39 @@ export function openRouterTools(tools = REPO_TOOLS) {
 // tool_choice is auto, so the model may answer on the first turn, and that
 // answer has to be the review object. Without the schema, Opus 5.5 returns
 // prose and the review fails as "not JSON" (PR 3222, head f312db5).
-export function openRouterChatBody({ system, messages, effort, withTools, mustAnswer, model = MODEL, schema = REVIEW_SCHEMA, schemaName = "suds_review" }) {
+//
+// cachePrompt marks three Anthropic breakpoints: the stable system prompt,
+// the tool definitions, and the first user message (the large per-batch repo
+// context: the diff and the findings still open on it). Later file-reading
+// rounds reuse that prefix. sessionId keeps those rounds, and the next batch
+// of the same PR, on the provider that holds the cache. Callers that are not
+// a review leave cachePrompt off, so a one-shot call is not a cache write.
+export function openRouterChatBody({ system, messages, effort, withTools, mustAnswer, model = MODEL, schema = REVIEW_SCHEMA, schemaName = "suds_review", cachePrompt = false, sessionId = "" }) {
+  const cache = cachePrompt && anthropicModel(model);
+  const conversation = Array.isArray(messages) ? messages : [];
+  let cachedUser = false;
+  const outgoing = conversation.map((message) => {
+    if (!cache || cachedUser || message?.role !== "user") return message;
+    cachedUser = true;
+    return withCacheBreakpoint(message);
+  });
   const body = {
     model,
     max_tokens: 32_000,
-    messages: [{ role: "system", content: system }, ...messages],
+    messages: [{ role: "system", content: cache ? [cachedText(system)] : system }, ...outgoing],
     reasoning: { effort },
     response_format: {
       type: "json_schema",
       json_schema: { name: schemaName, strict: true, schema },
     },
   };
+  if (cache && sessionId) body.session_id = String(sessionId).slice(0, 256);
   if (withTools && !mustAnswer) {
     body.tools = openRouterTools();
+    if (cache && body.tools.length) {
+      const last = body.tools.length - 1;
+      body.tools[last] = { ...body.tools[last], cache_control: { ...PROMPT_CACHE } };
+    }
     body.tool_choice = "auto";
   }
   return body;
