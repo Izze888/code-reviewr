@@ -7,7 +7,8 @@ reviewers missed.
 ## What it costs
 
 It uses Claude through OpenRouter. You pay OpenRouter. Each pull request costs
-about $3 to $7, depending on how big it is and how many times you push to it.
+about $3 to $7, depending on how big it is. Pushes that land close together
+are reviewed once, about 10 minutes after they stop.
 
 ## Set it up (about 10 minutes)
 
@@ -31,8 +32,9 @@ about $3 to $7, depending on how big it is and how many times you push to it.
 
 ## Using it
 
-- Notes show up on the changed lines. Fix the bug and push: it closes its own
-  note. If it's wrong, reply with why. The next review reads replies.
+- Notes show up on the changed lines. Fix the bug and push: about 10 minutes
+  after the pushes stop, it closes its own note. If it's wrong, reply with
+  why. The next review reads replies.
 - Add your own rules to `AGENTS.md` or `CLAUDE.md` in your project root. The
   robot reads them if they're there.
 - Turn it off: in GitHub Settings, Secrets and variables, Actions, Variables,
